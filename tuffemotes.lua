@@ -24,6 +24,10 @@ local Emotes = {}
 local FavoritedEmotes = {}
 local catalogPages = nil
 local isLoadingMore = false
+local FetchDebounce = false
+
+-- Rate Limit Protection Cache
+local EmoteCache = {} 
 
 -- Load Favorites
 if isfile and isfile("FavoritedEmotes.txt") then
@@ -108,7 +112,7 @@ CatalogTabBtn.Size = UDim2.new(0.5, 0, 0, 30)
 CatalogTabBtn.Position = UDim2.new(0, 0, 0, 30)
 CatalogTabBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
 CatalogTabBtn.Text = "Catalog"
-CatalogTabBtn.TextColor3 = Color3.fromRGB(255, 215, 0) -- Yellow active
+CatalogTabBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
 CatalogTabBtn.Font = Enum.Font.GothamBold
 CatalogTabBtn.TextSize = 14
 CatalogTabBtn.BorderSizePixel = 0
@@ -158,7 +162,7 @@ FavTabBtn.MouseButton1Click:Connect(function()
 	CatalogTabBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
 end)
 
--- Search & Random Bar (Catalog)
+-- Search & Random Bar
 local SearchBox = Instance.new("TextBox")
 SearchBox.Size = UDim2.new(0.7, -10, 0, 25)
 SearchBox.Position = UDim2.new(0, 10, 0, 10)
@@ -207,7 +211,6 @@ end
 local CatScroll = CreateScrollFrame(CatalogContainer)
 local FavScroll = CreateScrollFrame(FavContainer)
 
--- Random Fav Button
 local RandomFavBtn = RandomCatBtn:Clone()
 RandomFavBtn.Parent = FavContainer
 RandomFavBtn.Position = UDim2.new(0, 10, 0, 10)
@@ -220,15 +223,56 @@ local function PlayEmote(id, name)
 	local Character = LocalPlayer.Character
 	if not Character then return end
 	local Humanoid = Character:FindFirstChildOfClass("Humanoid")
-	local Description = Humanoid and Humanoid:FindFirstChildOfClass("HumanoidDescription")
+	local Animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator")
+	if not Animator then return end
+
+	-- Stop old custom emotes to prevent bizarre body blending
+	for _, track in ipairs(Animator:GetPlayingAnimationTracks()) do
+		if track:GetAttribute("IsCustomEmote") then
+			track:Stop()
+		end
+	end
+
+	if Humanoid.RigType == Enum.HumanoidRigType.R6 then return end
+
+	-- Bypass rate limits via internal Cache
+	if EmoteCache[id] then
+		local customTrack = Animator:LoadAnimation(EmoteCache[id])
+		customTrack.Priority = Enum.AnimationPriority.Action4 -- Overrides Animate script
+		customTrack:SetAttribute("IsCustomEmote", true)
+		customTrack:Play()
+		return
+	end
+
+	local Description = Humanoid:FindFirstChildOfClass("HumanoidDescription")
 	if not Description then return end
 
-	if Humanoid.RigType ~= Enum.HumanoidRigType.R6 then
-		local succ = pcall(function() Humanoid:PlayEmoteAndGetAnimTrackById(id) end)
-		if not succ then
-			Description:AddEmote(name or "Emote", id)
-			Humanoid:PlayEmoteAndGetAnimTrackById(id)
-		end
+	-- Initial load: Add to description and secretly extract the Animation Track
+	local success, r1, r2 = pcall(function()
+		Description:AddEmote(name or "Emote", id)
+		return Humanoid:PlayEmoteAndGetAnimTrackById(id)
+	end)
+
+	local nativeTrack = nil
+	if typeof(r1) == "Instance" and r1:IsA("AnimationTrack") then
+		nativeTrack = r1
+	elseif typeof(r2) == "Instance" and r2:IsA("AnimationTrack") then
+		nativeTrack = r2
+	end
+
+	if success and nativeTrack then
+		local animId = nativeTrack.Animation.AnimationId
+		nativeTrack:Stop() -- Assassinate the native track instantly
+
+		-- Resurrect it as a custom track the Animate script has no authority over
+		local customAnim = Instance.new("Animation")
+		customAnim.AnimationId = animId
+		EmoteCache[id] = customAnim 
+
+		local customTrack = Animator:LoadAnimation(customAnim)
+		customTrack.Priority = Enum.AnimationPriority.Action4
+		customTrack:SetAttribute("IsCustomEmote", true)
+		customTrack:Play()
 	end
 end
 
@@ -271,7 +315,6 @@ local function CreateEmoteCard(emote, parentScroll)
 		PlayEmote(emote.id, emote.name)
 	end)
 
-	-- Save/Remove Favorite
 	FavToggle.MouseButton1Click:Connect(function()
 		local idx = table.find(FavoritedEmotes, emote.id)
 		if idx then
@@ -295,7 +338,6 @@ function RefreshFavorites()
 		if child:IsA("Frame") then child:Destroy() end
 	end
 	for _, id in ipairs(FavoritedEmotes) do
-		-- Try to find name from loaded emotes, fallback to ID
 		local emoteData = {id = id, name = "Saved Emote"}
 		for _, e in ipairs(Emotes) do
 			if e.id == id then emoteData.name = e.name; break end
@@ -304,7 +346,6 @@ function RefreshFavorites()
 	end
 end
 
--- Catalog Logic
 local function ProcessCatalogPage(pageData)
 	for _, item in ipairs(pageData) do
 		local exists = false
@@ -320,6 +361,9 @@ local function ProcessCatalogPage(pageData)
 end
 
 local function FetchCatalog(keyword)
+	if FetchDebounce then return end
+	FetchDebounce = true
+
 	for _, child in ipairs(CatScroll:GetChildren()) do
 		if child:IsA("Frame") then child:Destroy() end
 	end
@@ -340,10 +384,13 @@ local function FetchCatalog(keyword)
 			ProcessCatalogPage(pages:GetCurrentPage())
 			RefreshFavorites()
 		end
+		
+		task.wait(1.5) -- Throttle to prevent SearchCatalog rate limiting
+		FetchDebounce = false
 	end)
 end
 
--- Scroll to Bottom (Load More)
+-- Safely Load More
 CatScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 	local maxScroll = CatScroll.AbsoluteCanvasSize.Y - CatScroll.AbsoluteWindowSize.Y
 	if CatScroll.CanvasPosition.Y >= maxScroll - 50 and not isLoadingMore then
@@ -353,12 +400,12 @@ CatScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 			if success then
 				ProcessCatalogPage(catalogPages:GetCurrentPage())
 			end
+			task.wait(1.2) -- Breather for API rate limits
 			isLoadingMore = false
 		end
 	end
 end)
 
--- Inputs
 SearchBox.FocusLost:Connect(function(enterPressed)
 	if enterPressed then
 		FetchCatalog(SearchBox.Text)
@@ -385,5 +432,4 @@ RandomFavBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Initial Load
 FetchCatalog()
