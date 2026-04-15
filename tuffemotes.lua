@@ -1,6 +1,4 @@
--- Place ID Check
 if game.PlaceId == 3095204897 then
-	print("ok")
 	return
 end
 
@@ -12,10 +10,10 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local AvatarEditorService = game:GetService("AvatarEditorService")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
--- Clean up old GUI
 if CoreGui:FindFirstChild("CustomEmoteHub") then
 	CoreGui.CustomEmoteHub:Destroy()
 end
@@ -26,10 +24,11 @@ local catalogPages = nil
 local isLoadingMore = false
 local FetchDebounce = false
 
--- Rate Limit Protection Cache
 local EmoteCache = {} 
+local LoopEmotes = true
+local currentEmoteTrack = nil
+local forceEmote = false
 
--- Load Favorites
 if isfile and isfile("FavoritedEmotes.txt") then
 	local succ, res = pcall(function()
 		return HttpService:JSONDecode(readfile("FavoritedEmotes.txt"))
@@ -45,9 +44,14 @@ local function SaveFavorites()
 	end
 end
 
--------------------------------------------------------------------------------
--- UI CONSTRUCTION
--------------------------------------------------------------------------------
+local function StopEmote()
+	forceEmote = false
+	if currentEmoteTrack then
+		currentEmoteTrack:Stop()
+		currentEmoteTrack = nil
+	end
+end
+
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "CustomEmoteHub"
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -67,7 +71,6 @@ local UICorner = Instance.new("UICorner")
 UICorner.CornerRadius = UDim.new(0, 8)
 UICorner.Parent = MainFrame
 
--- Top Bar & Dragging
 local TopBar = Instance.new("Frame")
 TopBar.Size = UDim2.new(1, 0, 0, 30)
 TopBar.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
@@ -87,7 +90,6 @@ Title.Font = Enum.Font.GothamBold
 Title.TextSize = 14
 Title.Parent = TopBar
 
--- Drag Logic
 local dragging, dragInput, dragStart, startPos
 TopBar.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -106,7 +108,6 @@ UserInputService.InputChanged:Connect(function(input)
 	end
 end)
 
--- Tabs
 local CatalogTabBtn = Instance.new("TextButton")
 CatalogTabBtn.Size = UDim2.new(0.5, 0, 0, 30)
 CatalogTabBtn.Position = UDim2.new(0, 0, 0, 30)
@@ -129,7 +130,6 @@ FavTabBtn.TextSize = 14
 FavTabBtn.BorderSizePixel = 0
 FavTabBtn.Parent = MainFrame
 
--- Tab Containers
 local CatalogContainer = Instance.new("Frame")
 CatalogContainer.Size = UDim2.new(1, 0, 1, -60)
 CatalogContainer.Position = UDim2.new(0, 0, 0, 60)
@@ -143,7 +143,6 @@ FavContainer.BackgroundTransparency = 1
 FavContainer.Visible = false
 FavContainer.Parent = MainFrame
 
--- Tab Switching Logic
 CatalogTabBtn.MouseButton1Click:Connect(function()
 	CatalogContainer.Visible = true
 	FavContainer.Visible = false
@@ -162,13 +161,12 @@ FavTabBtn.MouseButton1Click:Connect(function()
 	CatalogTabBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
 end)
 
--- Search & Random Bar
 local SearchBox = Instance.new("TextBox")
-SearchBox.Size = UDim2.new(0.7, -10, 0, 25)
+SearchBox.Size = UDim2.new(0.4, 0, 0, 25)
 SearchBox.Position = UDim2.new(0, 10, 0, 10)
 SearchBox.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
 SearchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-SearchBox.PlaceholderText = " Search Catalog (Press Enter)..."
+SearchBox.PlaceholderText = " Search Catalog..."
 SearchBox.Font = Enum.Font.Gotham
 SearchBox.TextSize = 13
 SearchBox.TextXAlignment = Enum.TextXAlignment.Left
@@ -177,9 +175,21 @@ SearchBox.BorderSizePixel = 0
 SearchBox.Parent = CatalogContainer
 Instance.new("UICorner", SearchBox).CornerRadius = UDim.new(0, 4)
 
+local LoopCatBtn = Instance.new("TextButton")
+LoopCatBtn.Size = UDim2.new(0.25, -5, 0, 25)
+LoopCatBtn.Position = UDim2.new(0.4, 15, 0, 10)
+LoopCatBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+LoopCatBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
+LoopCatBtn.Text = "🔁 Loop: ON"
+LoopCatBtn.Font = Enum.Font.GothamBold
+LoopCatBtn.TextSize = 12
+LoopCatBtn.BorderSizePixel = 0
+LoopCatBtn.Parent = CatalogContainer
+Instance.new("UICorner", LoopCatBtn).CornerRadius = UDim.new(0, 4)
+
 local RandomCatBtn = Instance.new("TextButton")
-RandomCatBtn.Size = UDim2.new(0.3, -20, 0, 25)
-RandomCatBtn.Position = UDim2.new(0.7, 10, 0, 10)
+RandomCatBtn.Size = UDim2.new(0.35, -20, 0, 25)
+RandomCatBtn.Position = UDim2.new(0.65, 10, 0, 10)
 RandomCatBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
 RandomCatBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
 RandomCatBtn.Text = "🎲 Random"
@@ -189,7 +199,38 @@ RandomCatBtn.BorderSizePixel = 0
 RandomCatBtn.Parent = CatalogContainer
 Instance.new("UICorner", RandomCatBtn).CornerRadius = UDim.new(0, 4)
 
--- Scrolling Frames
+local LoopFavBtn = LoopCatBtn:Clone()
+LoopFavBtn.Parent = FavContainer
+LoopFavBtn.Size = UDim2.new(0.4, 0, 0, 25)
+LoopFavBtn.Position = UDim2.new(0, 10, 0, 10)
+
+local RandomFavBtn = RandomCatBtn:Clone()
+RandomFavBtn.Parent = FavContainer
+RandomFavBtn.Size = UDim2.new(0.6, -20, 0, 25)
+RandomFavBtn.Position = UDim2.new(0.4, 10, 0, 10)
+
+local function UpdateLoopState()
+	local txt = LoopEmotes and "🔁 Loop: ON" or "🔁 Loop: OFF"
+	local col = LoopEmotes and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(150, 150, 150)
+	LoopCatBtn.Text = txt
+	LoopCatBtn.TextColor3 = col
+	LoopFavBtn.Text = txt
+	LoopFavBtn.TextColor3 = col
+	if currentEmoteTrack then
+		currentEmoteTrack.Looped = LoopEmotes
+	end
+end
+
+LoopCatBtn.MouseButton1Click:Connect(function()
+	LoopEmotes = not LoopEmotes
+	UpdateLoopState()
+end)
+
+LoopFavBtn.MouseButton1Click:Connect(function()
+	LoopEmotes = not LoopEmotes
+	UpdateLoopState()
+end)
+
 local function CreateScrollFrame(parent)
 	local Scroll = Instance.new("ScrollingFrame")
 	Scroll.Size = UDim2.new(1, -20, 1, -55)
@@ -211,68 +252,75 @@ end
 local CatScroll = CreateScrollFrame(CatalogContainer)
 local FavScroll = CreateScrollFrame(FavContainer)
 
-local RandomFavBtn = RandomCatBtn:Clone()
-RandomFavBtn.Parent = FavContainer
-RandomFavBtn.Position = UDim2.new(0, 10, 0, 10)
-RandomFavBtn.Size = UDim2.new(1, -20, 0, 25)
+local function GetRawEmoteId(catalogId, name)
+	if EmoteCache[catalogId] then return EmoteCache[catalogId] end
 
--------------------------------------------------------------------------------
--- FUNCTIONALITY
--------------------------------------------------------------------------------
+	local s1, objs = pcall(function() return game:GetObjects("rbxassetid://" .. tostring(catalogId)) end)
+	if s1 and objs and objs[1] then
+		local anim = objs[1]:FindFirstChildOfClass("Animation", true) or (objs[1]:IsA("Animation") and objs[1])
+		if anim and anim.AnimationId and anim.AnimationId ~= "" then
+			EmoteCache[catalogId] = anim.AnimationId
+			warn("[Velq Emotes] Success: Method 1 (game:GetObjects) utilized for " .. tostring(catalogId))
+			return anim.AnimationId
+		end
+	end
+
+	local s2, asset = pcall(function() return game:GetService("InsertService"):LoadAsset(catalogId) end)
+	if s2 and asset then
+		local anim = asset:FindFirstChildOfClass("Animation", true) or (asset:IsA("Animation") and asset)
+		if anim and anim.AnimationId and anim.AnimationId ~= "" then
+			EmoteCache[catalogId] = anim.AnimationId
+			warn("[Velq Emotes] Success: Method 2 (InsertService:LoadAsset) utilized for " .. tostring(catalogId))
+			return anim.AnimationId
+		end
+	end
+
+	local char = LocalPlayer.Character
+	if char then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local desc = hum and hum:FindFirstChildOfClass("HumanoidDescription")
+		if hum and desc then
+			local s3, r1, r2 = pcall(function()
+				desc:AddEmote(name or "Emote", catalogId)
+				return hum:PlayEmoteAndGetAnimTrackById(catalogId)
+			end)
+			local track = (typeof(r1) == "Instance" and r1:IsA("AnimationTrack") and r1) or (typeof(r2) == "Instance" and r2:IsA("AnimationTrack") and r2)
+			if track then
+				local rawId = track.Animation.AnimationId
+				track:Stop()
+				EmoteCache[catalogId] = rawId
+				warn("[Velq Emotes] Success: Method 3 (Native HumanoidDescription) utilized for " .. tostring(catalogId))
+				return rawId
+			end
+		end
+	end
+
+	warn("[Velq Emotes] CRITICAL: All 3 extraction methods failed for ID " .. tostring(catalogId))
+	return nil
+end
+
 local function PlayEmote(id, name)
 	local Character = LocalPlayer.Character
 	if not Character then return end
 	local Humanoid = Character:FindFirstChildOfClass("Humanoid")
 	local Animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator")
-	if not Animator then return end
+	
+	if not Animator or Humanoid.RigType == Enum.HumanoidRigType.R6 then return end
 
-	-- Stop old custom emotes to prevent bizarre body blending
-	for _, track in ipairs(Animator:GetPlayingAnimationTracks()) do
-		if track:GetAttribute("IsCustomEmote") then
-			track:Stop()
-		end
-	end
+	StopEmote()
 
-	if Humanoid.RigType == Enum.HumanoidRigType.R6 then return end
-
-	-- Bypass rate limits via internal Cache
-	if EmoteCache[id] then
-		local customTrack = Animator:LoadAnimation(EmoteCache[id])
-		customTrack.Priority = Enum.AnimationPriority.Action4 -- Overrides Animate script
-		customTrack:SetAttribute("IsCustomEmote", true)
-		customTrack:Play()
-		return
-	end
-
-	local Description = Humanoid:FindFirstChildOfClass("HumanoidDescription")
-	if not Description then return end
-
-	-- Initial load: Add to description and secretly extract the Animation Track
-	local success, r1, r2 = pcall(function()
-		Description:AddEmote(name or "Emote", id)
-		return Humanoid:PlayEmoteAndGetAnimTrackById(id)
-	end)
-
-	local nativeTrack = nil
-	if typeof(r1) == "Instance" and r1:IsA("AnimationTrack") then
-		nativeTrack = r1
-	elseif typeof(r2) == "Instance" and r2:IsA("AnimationTrack") then
-		nativeTrack = r2
-	end
-
-	if success and nativeTrack then
-		local animId = nativeTrack.Animation.AnimationId
-		nativeTrack:Stop() -- Assassinate the native track instantly
-
-		-- Resurrect it as a custom track the Animate script has no authority over
+	local rawId = GetRawEmoteId(id, name)
+	
+	if rawId then
 		local customAnim = Instance.new("Animation")
-		customAnim.AnimationId = animId
-		EmoteCache[id] = customAnim 
-
+		customAnim.AnimationId = rawId
 		local customTrack = Animator:LoadAnimation(customAnim)
 		customTrack.Priority = Enum.AnimationPriority.Action4
 		customTrack:SetAttribute("IsCustomEmote", true)
+		customTrack.Looped = LoopEmotes
 		customTrack:Play()
+		currentEmoteTrack = customTrack
+		forceEmote = true
 	end
 end
 
@@ -385,12 +433,11 @@ local function FetchCatalog(keyword)
 			RefreshFavorites()
 		end
 		
-		task.wait(1.5) -- Throttle to prevent SearchCatalog rate limiting
+		task.wait(1.5) 
 		FetchDebounce = false
 	end)
 end
 
--- Safely Load More
 CatScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 	local maxScroll = CatScroll.AbsoluteCanvasSize.Y - CatScroll.AbsoluteWindowSize.Y
 	if CatScroll.CanvasPosition.Y >= maxScroll - 50 and not isLoadingMore then
@@ -400,7 +447,7 @@ CatScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 			if success then
 				ProcessCatalogPage(catalogPages:GetCurrentPage())
 			end
-			task.wait(1.2) -- Breather for API rate limits
+			task.wait(1.2) 
 			isLoadingMore = false
 		end
 	end
@@ -413,8 +460,12 @@ SearchBox.FocusLost:Connect(function(enterPressed)
 end)
 
 UserInputService.InputBegan:Connect(function(input, processed)
-	if not processed and input.KeyCode == Enum.KeyCode.Comma then
-		MainFrame.Visible = not MainFrame.Visible
+	if not processed then
+		if input.KeyCode == Enum.KeyCode.Comma then
+			MainFrame.Visible = not MainFrame.Visible
+		elseif input.KeyCode == Enum.KeyCode.X then
+			StopEmote()
+		end
 	end
 end)
 
@@ -429,6 +480,26 @@ RandomFavBtn.MouseButton1Click:Connect(function()
 	if #FavoritedEmotes > 0 then
 		local randId = FavoritedEmotes[math.random(1, #FavoritedEmotes)]
 		PlayEmote(randId, "Emote")
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	if forceEmote and currentEmoteTrack and currentEmoteTrack.Parent then
+		if not currentEmoteTrack.IsPlaying then
+			if not LoopEmotes and currentEmoteTrack.TimePosition >= currentEmoteTrack.Length - 0.05 then
+				forceEmote = false
+				return
+			end
+			currentEmoteTrack:Play()
+		end
+		
+		for _, track in ipairs(currentEmoteTrack.Parent:GetPlayingAnimationTracks()) do
+			if track ~= currentEmoteTrack and not track:GetAttribute("IsCustomEmote") then
+				if track.Priority == Enum.AnimationPriority.Action or track.Priority == Enum.AnimationPriority.Action2 or track.Priority == Enum.AnimationPriority.Action3 or track.Priority == Enum.AnimationPriority.Action4 then
+					track:Stop()
+				end
+			end
+		end
 	end
 end)
 
